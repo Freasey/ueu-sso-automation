@@ -5,14 +5,13 @@ import {
   Linking,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native'
 import * as Clipboard from 'expo-clipboard'
 import { useEngine } from '../engine/SsoEngine'
-import { loadAiSettings } from '../lib/aiSettings'
-import { checkQuizAnswers } from '../lib/aiClient'
 
 // "0:28:35" (format quiz-time-left Moodle, h:mm:ss) -> 1715 (detik).
 function parseHms(text) {
@@ -46,6 +45,90 @@ function buildQuizText(pages) {
   return lines.join('\n').trim()
 }
 
+// Penanda unik yang diminta AI pakai per soal — sengaja bukan kata biasa
+// (bukan "Soal"/"Jawaban") supaya kecil kemungkinan diubah/diformat ulang
+// (markdown/bold/bullet/numbering) oleh chat app, dan gampang dicari dengan
+// regex tanpa peduli ada teks lain di sekitarnya.
+const ANSWER_MARKER = 'JAWABQUIZ'
+
+// Susun soal + instruksi format balasan, siap dibagikan ke app AI (ChatGPT/
+// Claude/Gemini dst) lewat share sheet. Formatnya (baris "JAWABQUIZ|...")
+// sengaja kaku & tidak lazim supaya AI kecil kemungkinan mengubahnya jadi
+// markdown/bullet yang bikin parseAiReply gagal membaca balik.
+function buildAiPrompt(pages) {
+  const lines = [
+    'Tolong bantu saya belajar dengan menjawab soal pilihan ganda kuliah berikut.',
+    'ATURAN BALASAN (wajib diikuti persis untuk SETIAP soal, tanpa kecuali):',
+    `- Tulis SATU baris polos (tanpa markdown/bold/italic/bullet/heading) dengan format persis:`,
+    `${ANSWER_MARKER}|<nomor soal>|<huruf jawaban>|<penjelasan singkat 1-2 kalimat>`,
+    `- Contoh: ${ANSWER_MARKER}|1|b|Karena b adalah satu-satunya pilihan yang sesuai definisi.`,
+    '- Jangan pecah satu baris itu jadi beberapa baris, jangan tambahkan penomoran lain di depannya.',
+    '- Boleh ditutup dengan penjelasan tambahan di luar baris itu, tapi baris berformat di atas WAJIB ada untuk tiap soal.',
+    '',
+    'Soal-soal:',
+    '',
+  ]
+  for (const p of pages) {
+    for (const q of p.questions) {
+      if (q.choices.length === 0) continue
+      lines.push(`Soal ${q.qno}. ${q.text}`)
+      q.choices.forEach((c, i) => {
+        lines.push(`${String.fromCharCode(97 + i)}. ${c.label}`)
+      })
+      lines.push('')
+    }
+  }
+  return lines.join('\n').trim()
+}
+
+// Cari semua baris "JAWABQUIZ|<no>|<huruf>|<penjelasan>" di mana pun posisinya
+// di teks (bukan hanya awal baris) — makin toleran terhadap AI yang tetap
+// menambah bullet/nomor/markdown di depannya. Penjelasan boleh berlanjut ke
+// baris berikutnya (dipotong saat ketemu marker berikutnya atau teks habis).
+function parseMarkedReply(text) {
+  const out = {}
+  const re = new RegExp(
+    `${ANSWER_MARKER}\\s*\\|\\s*(\\d{1,3})\\s*\\|\\s*([a-zA-Z])\\s*\\|\\s*([\\s\\S]*?)(?=${ANSWER_MARKER}\\s*\\||$)`,
+    'gi',
+  )
+  let m
+  while ((m = re.exec(text))) {
+    // Kalau ada baris kosong sebelum marker soal berikutnya (mis. heading
+    // "2. **Soal 2**" yang ditinggal AI di antara dua marker), jangan ikut
+    // masukkan sisa teks itu ke penjelasan soal sebelumnya.
+    let explanation = m[3]
+    const blankIdx = explanation.search(/\n[ \t]*\n/)
+    if (blankIdx >= 0) explanation = explanation.slice(0, blankIdx)
+    out[m[1]] = { letter: m[2].toLowerCase(), explanation: explanation.trim() }
+  }
+  return out
+}
+
+// Fallback kalau AI tidak memakai format JAWABQUIZ sama sekali (mis. dari
+// balasan lama atau model yang mengabaikan instruksi) — coba baca pola bebas
+// "Soal <no>: <huruf>) <penjelasan>" per baris, setelah markdown dibuang.
+function parseLenientReply(text) {
+  const out = {}
+  const cleaned = text.replace(/[*_`#>]+/g, '')
+  const lineRe = /(?:soal|no\.?|question|nomor)?\s*#?(\d{1,3})\s*[.:\)\-]+\s*([a-hA-H])\)?\s*[.:\-]?\s*(.*)/i
+  for (const raw of cleaned.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    const m = lineRe.exec(line)
+    if (!m) continue
+    out[m[1]] = { letter: m[2].toLowerCase(), explanation: m[3].trim() }
+  }
+  return out
+}
+
+// Coba format ketat (JAWABQUIZ) dulu; kalau tidak ketemu sama sekali, coba
+// pola bebas sebagai cadangan.
+function parseAiReply(text) {
+  const strict = parseMarkedReply(text)
+  if (Object.keys(strict).length > 0) return strict
+  return parseLenientReply(text)
+}
+
 // "b" + soal -> "B. <teks pilihan b>", buat menampilkan saran AI.
 function aiChoiceLabel(q, result) {
   const idx = result.letter ? result.letter.charCodeAt(0) - 97 : -1
@@ -75,8 +158,9 @@ export default function QuizScreen({ quiz, onClose }) {
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null) // pesan/snippet dari halaman yang tak dikenali
   const [copied, setCopied] = useState(false)
-  const [aiChecking, setAiChecking] = useState(false)
-  const [aiResults, setAiResults] = useState({}) // { "qubaid:slot": { letter, explanation } }
+  const [aiSharing, setAiSharing] = useState(false)
+  const [aiPasting, setAiPasting] = useState(false)
+  const [aiResults, setAiResults] = useState({}) // { [qno]: { letter, explanation } }
 
   // Hitung mundur lokal (perkiraan) — dimulai dari waktu tersisa saat quiz
   // dimuat, lalu jalan sendiri tiap detik. Timer sesungguhnya tetap di server.
@@ -95,27 +179,47 @@ export default function QuizScreen({ quiz, onClose }) {
     setTimeout(() => setCopied(false), 2000)
   }, [pages])
 
-  // Kirim semua soal (yang punya pilihan ganda) ke AI, minta saran jawaban +
-  // penjelasan singkat. Hanya membaca soal — tidak menyentuh jawaban yang
-  // sudah dipilih atau mengirim apa pun ke Moodle.
-  const checkAnswers = useCallback(async () => {
-    setAiChecking(true)
+  // Salin soal (+ instruksi format balasan) ke clipboard lalu buka share sheet
+  // OS supaya user tinggal ketuk ChatGPT/Claude/Gemini dkk — teksnya sudah
+  // ikut terkirim ke app yang dipilih, tidak perlu paste manual. App kita
+  // tidak pernah membaca/mengontrol app lain; hanya sampai titik "berbagi".
+  const shareToAi = useCallback(async () => {
+    setAiSharing(true)
     try {
-      const settings = await loadAiSettings()
-      const items = pages.flatMap((p) =>
-        p.questions
-          .filter((q) => q.choices.length > 0)
-          .map((q) => ({ id: `${q.qubaid}:${q.slot}`, text: q.text, choices: q.choices })),
-      )
-      const results = await checkQuizAnswers(settings, items)
-      setAiResults((s) => ({ ...s, ...results }))
+      const prompt = buildAiPrompt(pages)
+      await Clipboard.setStringAsync(prompt)
+      await Share.share({ message: prompt })
     } catch (e) {
-      console.error('[QuizScreen] checkAnswers FAILED:', e)
-      Alert.alert('Periksa Jawaban gagal', e.message)
+      console.error('[QuizScreen] shareToAi FAILED:', e)
     } finally {
-      setAiChecking(false)
+      setAiSharing(false)
     }
   }, [pages])
+
+  // Setelah user menyalin balasan AI (dari app ChatGPT/Claude/Gemini dkk),
+  // baca clipboard di sini dan parse jadi saran jawaban per soal. Ini
+  // satu-satunya cara "membaca balasan AI" yang mungkin dari app pihak ketiga
+  // — tidak ada API buat baca UI/hasil app lain secara otomatis.
+  const pasteAiReply = useCallback(async () => {
+    setAiPasting(true)
+    try {
+      const text = await Clipboard.getStringAsync()
+      const parsed = parseAiReply(text || '')
+      if (Object.keys(parsed).length === 0) {
+        Alert.alert(
+          'Balasan tidak terbaca',
+          'Pastikan kamu sudah menyalin balasan dari app AI (bukan teks lain) sebelum menekan tombol ini.',
+        )
+        return
+      }
+      setAiResults((s) => ({ ...s, ...parsed }))
+    } catch (e) {
+      console.error('[QuizScreen] pasteAiReply FAILED:', e)
+      Alert.alert('Gagal membaca clipboard', e.message)
+    } finally {
+      setAiPasting(false)
+    }
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -168,7 +272,7 @@ export default function QuizScreen({ quiz, onClose }) {
           }
           setAnswers(seed)
           setPages(res.pages)
-          setSecondsLeft(parseHms(res.timeLeft))
+          setSecondsLeft(res.timeLeftSeconds != null ? res.timeLeftSeconds : parseHms(res.timeLeft))
           setPhase('question')
         } else if (res.kind === 'summary' || res.kind === 'review') {
           setPhase(res.kind)
@@ -398,25 +502,36 @@ export default function QuizScreen({ quiz, onClose }) {
                 </Text>
               </Pressable>
               <Pressable
-                style={[styles.copyBtn, styles.aiBtn, aiChecking && styles.disabled]}
-                onPress={checkAnswers}
-                disabled={aiChecking}
+                style={[styles.copyBtn, styles.aiBtn, aiSharing && styles.disabled]}
+                onPress={shareToAi}
+                disabled={aiSharing}
               >
-                {aiChecking ? (
-                  <ActivityIndicator size="small" color="#334155" />
+                {aiSharing ? (
+                  <ActivityIndicator size="small" color="#1d4ed8" />
                 ) : (
-                  <Text style={styles.copyBtnText}>Periksa Jawaban (AI)</Text>
+                  <Text style={[styles.copyBtnText, styles.aiBtnText]}>Kirim ke AI</Text>
+                )}
+              </Pressable>
+              <Pressable
+                style={[styles.copyBtn, styles.aiBtn, aiPasting && styles.disabled]}
+                onPress={pasteAiReply}
+                disabled={aiPasting}
+              >
+                {aiPasting ? (
+                  <ActivityIndicator size="small" color="#1d4ed8" />
+                ) : (
+                  <Text style={[styles.copyBtnText, styles.aiBtnText]}>Tempel Balasan AI</Text>
                 )}
               </Pressable>
             </View>
-            {Object.keys(aiResults).length > 0 && (
-              <Text style={styles.aiDisclaimer}>
-                Saran AI bisa saja salah — gunakan sebagai bantuan belajar, bukan jawaban pasti.
-              </Text>
-            )}
+            <Text style={styles.aiDisclaimer}>
+              "Kirim ke AI" membagikan soal ke ChatGPT/Claude/Gemini dkk lewat menu berbagi. Minta
+              AI menjawab, salin balasannya, lalu tekan "Tempel Balasan AI" di sini. Saran AI bisa
+              salah — pakai sebagai bantuan belajar, bukan jawaban pasti.
+            </Text>
             {pages.flatMap((p) =>
               p.questions.map((q) => {
-                const aiResult = aiResults[`${q.qubaid}:${q.slot}`]
+                const aiResult = aiResults[String(q.qno)]
                 return (
                   <View key={`${q.qubaid}:${q.slot}`} style={styles.qcard}>
                     <View style={styles.qhead}>
@@ -559,11 +674,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   aiBtn: { borderColor: '#1d4ed8' },
+  aiBtnText: { color: '#1d4ed8' },
   copyBtnText: { fontSize: 12, fontWeight: '600', color: '#334155' },
   aiDisclaimer: {
     fontSize: 11,
-    color: '#b45309',
-    marginTop: -6,
+    color: '#64748b',
+    lineHeight: 15,
     marginBottom: 12,
   },
   aiBox: {

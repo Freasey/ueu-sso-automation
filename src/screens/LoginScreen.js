@@ -12,7 +12,6 @@ import {
 } from 'react-native'
 import { useEngine } from '../engine/SsoEngine'
 import { clearCreds, loadCreds, saveCreds, unlockWithDeviceAuth } from '../lib/credentials'
-import { resetAiSettingsIfAccountChanged } from '../lib/aiSettings'
 
 // Port LoginForm dari src/App.jsx asal — tapi login berjalan on-device lewat
 // SsoEngine (WebView tersembunyi), tanpa server. Kredensial yang pernah sukses
@@ -52,7 +51,6 @@ export default function LoginScreen({ onSuccess, allowAuto = true }) {
       }
 
       await saveCreds({ username: username.trim(), password })
-      await resetAiSettingsIfAccountChanged(username.trim())
       onSuccess({ user: data.user, courses: data.courses })
     } catch (err) {
       setError(`Login gagal: ${err.message}. Periksa koneksi internet lalu coba lagi.`)

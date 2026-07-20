@@ -56,6 +56,26 @@ function parseQuestionBlock(qubaid, slot, classes, block) {
   return { qubaid, slot, type, qno, state, grade, text, choices }
 }
 
+// Ambil sisa waktu quiz. Moodle sering merender <span id="quiz-time-left">
+// KOSONG di HTML lalu mengisi teksnya belakangan lewat JS timer client-side
+// (nilai awal-nya dikirim ke JS lewat inline <script>, bukan sebagai teks
+// span) — jadi span-nya sendiri tidak selalu bisa diandalkan. Coba beberapa
+// pola secara berurutan: (1) isi span kalau memang sudah terisi teks di HTML
+// awal, (2) angka detik yang dioper ke JS timer lewat inline script.
+function extractTimeLeft(html) {
+  const spanText = strip(
+    /<span[^>]*\bid=["']quiz-time-left["'][^>]*>([\s\S]*?)<\/span>/i.exec(html)?.[1] || '',
+  )
+  if (spanText) return { text: spanText, seconds: null }
+
+  const jsMatch =
+    /\btimeleft["']?\s*[:=]\s*(\d+)/i.exec(html) ||
+    /M\.mod_quiz\.timer\.init\([^,]*,\s*(\d+)/i.exec(html)
+  if (jsMatch) return { text: null, seconds: Number(jsMatch[1]) }
+
+  return { text: null, seconds: null }
+}
+
 /** Parse satu halaman soal quiz (bisa berisi >1 soal). */
 export function parseQuizAttemptPage(html) {
   const formTag = /<form[^>]*\bid="responseform"[^>]*>/i.exec(html)?.[0] || ''
@@ -80,13 +100,15 @@ export function parseQuizAttemptPage(html) {
 
   const titleText = /<title>([\s\S]*?)<\/title>/i.exec(html)?.[1] || ''
   const pageMatch = /\(page (\d+) of (\d+)\)/i.exec(titleText)
+  const timeLeft = extractTimeLeft(html)
 
   return {
     kind: 'question',
     formAction,
     attempt: /name="attempt" value="(\d+)"/i.exec(html)?.[1] || null,
     thispage: /name="thispage" value="(\d+)"/i.exec(html)?.[1] || null,
-    timeLeft: strip(/<span id="quiz-time-left">([\s\S]*?)<\/span>/i.exec(html)?.[1] || '') || null,
+    timeLeft: timeLeft.text,
+    timeLeftSeconds: timeLeft.seconds,
     page: pageMatch ? { current: Number(pageMatch[1]), total: Number(pageMatch[2]) } : null,
     questions,
     actions,

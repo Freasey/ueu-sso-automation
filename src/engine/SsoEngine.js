@@ -614,10 +614,14 @@ class Engine {
         kind: 'question',
         url: entry.url,
         timeLeft: entry.timeLeft,
+        timeLeftSeconds: entry.timeLeftSeconds,
         pages: pages.filter(Boolean),
       }
-      qlog('full: done —', result.pages.length, '/', total, 'page(s) loaded,',
-        result.pages.reduce((n, p) => n + p.questions.length, 0), 'question(s) total')
+      qlog(
+        'full: done —', result.pages.length, '/', total, 'page(s) loaded,',
+        result.pages.reduce((n, p) => n + p.questions.length, 0), 'question(s) total —',
+        'timeLeft=', result.timeLeft, 'timeLeftSeconds=', result.timeLeftSeconds,
+      )
       return result
     })
   }

@@ -3,7 +3,6 @@ import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'rea
 import { useEngine } from '../engine/SsoEngine'
 import CourseCard from '../components/CourseCard'
 import QuizScreen from './QuizScreen'
-import AiSettingsScreen from './AiSettingsScreen'
 
 // Dashboard lazy: TIDAK ada fetch otomatis setelah login. Data satu course
 // baru diambil saat course-nya diketuk (outline dulu, lalu tiap item mengisi
@@ -18,7 +17,6 @@ export default function DashboardScreen({ session, onLogout }) {
   const [expanded, setExpanded] = useState({})
   const [refreshing, setRefreshing] = useState(false)
   const [activeQuiz, setActiveQuiz] = useState(null) // { name, url, cmid } | null
-  const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
   // Sumber kebenaran sinkron course mana yang fetch-nya sudah dimulai
   // (state outlines menyusul di render berikutnya).
   const startedRef = useRef(new Set())
@@ -133,10 +131,6 @@ export default function DashboardScreen({ session, onLogout }) {
     return <QuizScreen quiz={activeQuiz} onClose={() => setActiveQuiz(null)} />
   }
 
-  if (aiSettingsOpen) {
-    return <AiSettingsScreen onClose={() => setAiSettingsOpen(false)} />
-  }
-
   return (
     <View style={styles.root}>
       <View style={styles.head}>
@@ -148,9 +142,6 @@ export default function DashboardScreen({ session, onLogout }) {
             </Text>
           )}
         </View>
-        <Pressable style={[styles.ghost, styles.ghostGap]} onPress={() => setAiSettingsOpen(true)}>
-          <Text style={styles.ghostText}>Pengaturan AI</Text>
-        </Pressable>
         <Pressable style={styles.ghost} onPress={onLogout}>
           <Text style={styles.ghostText}>Keluar</Text>
         </Pressable>
@@ -228,7 +219,6 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   ghostText: { color: '#334155', fontSize: 13, fontWeight: '600' },
-  ghostGap: { marginRight: 8 },
   list: { padding: 16, paddingTop: 8 },
   toolbar: { marginBottom: 12 },
   loadAll: {
